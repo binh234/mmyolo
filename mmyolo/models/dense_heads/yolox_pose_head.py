@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import copy
 from collections import defaultdict
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -277,6 +278,9 @@ class YOLOXPoseHead(YOLOXHead):
             with OutputSaveFunctionWrapper(
                     batched_nms,
                     super()._bbox_post_process.__globals__) as outputs_2:
+
+                cfg = self.test_cfg if cfg is None else cfg
+                cfg = copy.deepcopy(cfg)
                 results_list = super().predict_by_feat(cls_scores, bbox_preds,
                                                        objectnesses,
                                                        batch_img_metas, cfg,
