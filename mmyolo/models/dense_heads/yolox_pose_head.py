@@ -272,6 +272,19 @@ class YOLOXPoseHead(YOLOXHead):
         intermediate output from a parent class without copying a
         arge block of code
         """
+        if torch.onnx.is_in_onnx_export():
+            return self.predict_by_feat__export(
+                cls_scores=cls_scores,
+                bbox_preds=bbox_preds,
+                objectnesses=objectnesses,
+                kpt_preds=kpt_preds,
+                vis_preds=vis_preds,
+                batch_img_metas=batch_img_metas,
+                cfg=cfg,
+                rescale=rescale,
+                with_nms=False
+            )
+        
         with OutputSaveFunctionWrapper(
                 filter_scores_and_topk,
                 super().predict_by_feat.__globals__) as outputs_1:
@@ -349,6 +362,97 @@ class YOLOXPoseHead(YOLOXHead):
 
         results_list = [r.numpy() for r in results_list]
         return results_list
+    
+    def predict_by_feat__export(self,
+                        cls_scores: List[Tensor],
+                        bbox_preds: List[Tensor],
+                        objectnesses: Optional[List[Tensor]] = None,
+                        kpt_preds: Optional[List[Tensor]] = None,
+                        vis_preds: Optional[List[Tensor]] = None,
+                        batch_img_metas: Optional[List[dict]] = None,
+                        cfg: Optional[ConfigDict] = None,
+                        rescale: bool = True,
+                        with_nms: bool = True):
+        dtype = cls_scores[0].dtype
+        device = cls_scores[0].device
+        batch_size = bbox_preds[0].shape[0]
+
+        cfg = self.test_cfg if cfg is None else cfg
+
+        multi_label = cfg.multi_label
+        multi_label &= self.num_classes > 1
+        cfg.multi_label = multi_label
+
+        batch_size = cls_scores[0].shape[0]
+        featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
+
+        self.mlvl_priors = self.prior_generator.grid_priors(
+            featmap_sizes, dtype=dtype, device=device)
+
+        flatten_priors = torch.cat(self.mlvl_priors)
+
+        mlvl_strides = [
+            flatten_priors.new_full((featmap_size.numel(), ), stride)
+            for featmap_size, stride in zip(featmap_sizes, self.featmap_strides)
+        ]
+        flatten_stride = torch.cat(mlvl_strides)
+
+        # flatten cls_scores, bbox_preds and objectness
+        flatten_cls_scores = [
+            cls_score.permute(0, 2, 3, 1).reshape(batch_size, -1,
+                                                  self.num_classes)
+            for cls_score in cls_scores
+        ]
+        flatten_bbox_preds = [
+            bbox_pred.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
+            for bbox_pred in bbox_preds
+        ]
+        flatten_vis_preds = [
+            vis_pred.permute(0, 2, 3, 1).reshape(
+                batch_size, -1, self.num_keypoints) for vis_pred in vis_preds
+        ]
+        flatten_kpt_preds = [
+            kpt_pred.permute(0, 2, 3, 1).reshape(
+                batch_size, -1, self.num_keypoints * 2) for kpt_pred in kpt_preds
+        ]
+        flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
+        flatten_kpt_preds = torch.cat(flatten_kpt_preds, dim=1)
+        flatten_vis_preds = torch.cat(flatten_vis_preds, dim=1).sigmoid()
+
+        bboxes = self.bbox_coder.decode(
+            flatten_priors[None], flatten_bbox_preds, flatten_stride)
+        # Ensure scores come after bboxes in output
+        flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()
+
+        if objectnesses is not None:
+            flatten_objectness = [
+                objectness.permute(0, 2, 3, 1).reshape(batch_size, -1)
+                for objectness in objectnesses
+            ]
+            flatten_objectness = torch.cat(flatten_objectness, dim=1).sigmoid()
+            flatten_cls_scores= flatten_cls_scores * (flatten_objectness.unsqueeze(-1))
+
+        scores = flatten_cls_scores
+        flatten_decoded_kpts = self.decode_pose(flatten_priors, flatten_kpt_preds, flatten_stride)
+        pred_kpts = torch.cat([flatten_decoded_kpts,
+                               flatten_vis_preds.unsqueeze(3)],
+                              dim=3)
+
+        # nms
+        pre_top_k = cfg.get('pre_top_k', 1000)
+
+        if cfg.multi_label:
+            scores, _ = scores.max(1)
+        else:
+            scores = scores.squeeze(-1)
+
+        _, keep_indices = torch.topk(scores, pre_top_k, dim=1)
+        batch_inds = torch.arange(batch_size, device=scores.device).view(-1, 1)
+        dets = torch.cat([bboxes, scores], dim=2)
+        dets = dets[batch_inds, keep_indices, ...]
+        pred_kpts = pred_kpts[batch_inds, keep_indices, ...]
+
+        return dets, pred_kpts
 
     def decode_pose(self, grids: torch.Tensor, offsets: torch.Tensor,
                     strides: Union[torch.Tensor, int]) -> torch.Tensor:
