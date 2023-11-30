@@ -379,10 +379,6 @@ class YOLOXPoseHead(YOLOXHead):
 
         cfg = self.test_cfg if cfg is None else cfg
 
-        multi_label = cfg.multi_label
-        multi_label &= self.num_classes > 1
-        cfg.multi_label = multi_label
-
         batch_size = cls_scores[0].shape[0]
         featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
 
@@ -441,12 +437,8 @@ class YOLOXPoseHead(YOLOXHead):
         # nms
         pre_top_k = cfg.get('pre_top_k', 1000)
 
-        if cfg.multi_label:
-            scores, _ = scores.max(1)
-        else:
-            scores = scores.squeeze(-1)
-
-        _, keep_indices = torch.topk(scores, pre_top_k, dim=1)
+        max_scores, _ = scores.max(-1)
+        _, keep_indices = torch.topk(max_scores, pre_top_k, dim=1)
         batch_inds = torch.arange(batch_size, device=scores.device).view(-1, 1)
         dets = torch.cat([bboxes, scores], dim=2)
         dets = dets[batch_inds, keep_indices, ...]
