@@ -375,11 +375,10 @@ class YOLOXPoseHead(YOLOXHead):
                         with_nms: bool = True):
         dtype = cls_scores[0].dtype
         device = cls_scores[0].device
-        batch_size = bbox_preds[0].shape[0]
+        batch_size = cls_scores[0].shape[0]
 
         cfg = self.test_cfg if cfg is None else cfg
 
-        batch_size = cls_scores[0].shape[0]
         featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
 
         self.mlvl_priors = self.prior_generator.grid_priors(
