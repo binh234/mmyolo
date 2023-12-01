@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from copy import deepcopy
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -44,10 +44,12 @@ class DeployPoseModel(nn.Module):
 
     def __init_sub_attributes(self):
         self.bbox_decoder = self.baseHead.bbox_coder.decode
+        self.pose_decoder = self.baseHead.decode_pose
         self.prior_generate = self.baseHead.prior_generator.grid_priors
         self.num_base_priors = self.baseHead.num_base_priors
         self.featmap_strides = self.baseHead.featmap_strides
         self.num_classes = self.baseHead.num_classes
+        self.num_keypoints = self.baseHead.num_keypoints
 
     def __switch_deploy(self):
         headType = type(self.baseHead)
@@ -124,7 +126,7 @@ class DeployPoseModel(nn.Module):
         flatten_kpt_preds = torch.cat(flatten_kpt_preds, dim=1)
         flatten_vis_preds = torch.cat(flatten_vis_preds, dim=1).sigmoid()
 
-        bboxes = self.bbox_coder.decode(flatten_priors[None], flatten_bbox_preds, flatten_stride)
+        bboxes = bbox_decoder(flatten_priors[None], flatten_bbox_preds, flatten_stride)
 
         if objectnesses is not None:
             flatten_objectness = [
@@ -149,6 +151,28 @@ class DeployPoseModel(nn.Module):
         pred_kpts = pred_kpts[batch_inds, keep_indices, ...]
 
         return dets, pred_kpts
+
+    def decode_pose(self, grids: torch.Tensor, offsets: torch.Tensor,
+                    strides: Union[torch.Tensor, int]) -> torch.Tensor:
+        """Decode regression offsets to keypoints.
+
+        Args:
+            grids (torch.Tensor): The coordinates of the feature map grids.
+            offsets (torch.Tensor): The predicted offset of each keypoint
+                relative to its corresponding grid.
+            strides (torch.Tensor | int): The stride of the feature map for
+                each instance.
+        Returns:
+            torch.Tensor: The decoded keypoints coordinates.
+        """
+
+        if isinstance(strides, int):
+            strides = torch.tensor([strides]).to(offsets)
+
+        strides = strides.reshape(1, -1, 1, 1)
+        offsets = offsets.reshape(*offsets.shape[:2], -1, 2)
+        xy_coordinates = (offsets[..., :2] * strides) + grids.unsqueeze(1)
+        return xy_coordinates
 
     def select_nms(self):
         if self.backend in (MMYOLOBackend.ONNXRUNTIME, MMYOLOBackend.OPENVINO):
