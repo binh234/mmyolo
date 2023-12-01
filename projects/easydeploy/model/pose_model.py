@@ -92,11 +92,10 @@ class DeployPoseModel(nn.Module):
 
         featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
 
-        self.mlvl_priors = self.prior_generator.grid_priors(
-            featmap_sizes, dtype=dtype, device=device
-        )
+        mlvl_priors = self.prior_generate(
+            featmap_sizes, dtype=dtype, device=device)
 
-        flatten_priors = torch.cat(self.mlvl_priors)
+        flatten_priors = torch.cat(mlvl_priors)
 
         mlvl_strides = [
             flatten_priors.new_full((featmap_size.numel(),), stride)
